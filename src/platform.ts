@@ -9,17 +9,11 @@ import {
 } from 'homebridge';
 
 import { PLATFORM_NAME, PLUGIN_NAME } from './settings';
-import { axiosApi, axiosAppliance, axiosAuth } from './services/axios';
+import { axiosAppliance, axiosAuth } from './services/axios';
 import { Appliances } from './definitions/appliances';
 import { DEVICES } from './const/devices';
-import { CLIENT_ID, CLIENT_SECRET } from './const/apiKey';
-import Gigya, { DataCenter } from 'gigya';
 import { TokenResponse } from './definitions/auth';
 import { ElectroluxAccessory } from './accessories/accessory';
-import fs from 'fs';
-import path from 'path';
-import { IdentityProvidersResponse } from './definitions/identityProviders';
-import { API_URL } from './const/url';
 import { Capabilities } from './definitions/capabilities';
 import { Context } from './definitions/context';
 
@@ -34,11 +28,6 @@ export class ElectroluxDevicesPlatform implements DynamicPlatformPlugin {
         this.api.hap.Characteristic;
 
     public readonly accessories: ElectroluxAccessory[] = [];
-
-    private gigya: Gigya | null = null;
-    private uid: string | null = null;
-    private oauthToken: string | null = null;
-    private sessionSecret: string | null = null;
 
     accessToken: string | null = null;
     private refreshToken: string | null = null;
@@ -104,145 +93,14 @@ export class ElectroluxDevicesPlatform implements DynamicPlatformPlugin {
             Get the token from Electrolux API using CLIENT_ID and CLIENT_SECRET 
             to fetch the regional base URL and API key.
         */
-        const tokenResponse = await axiosAuth.post<TokenResponse>(
-            '/one-account-authorization/api/v1/token',
-            {
-                grantType: 'client_credentials',
-                clientId: CLIENT_ID,
-                clientSecret: CLIENT_SECRET,
-                scope: ''
-            },
-            {
-                baseURL: API_URL
-            }
-        );
+        this.log.info('one-account-authorization');
 
-        const regionResponse = await axiosApi.get<IdentityProvidersResponse>(
-            `/one-account-user/api/v1/identity-providers?email=${encodeURIComponent(this.config.email)}&loginType=OTP`,
-            {
-                headers: {
-                    Authorization: `Bearer ${tokenResponse.data.accessToken}`
-                }
-            }
-        );
+        this.accessToken =
+            'Bearer eyJraWQiOiIxMGZhMWQwOWY4YjM2OGFjYmE4YmRiNDYxOTFmZmVhODE1MmZiM2YzZjQ5N2RhZjk1OWFjNWIzNDM5ZDI3OGY0IiwiYWxnIjoiUlMyNTYiLCJ0eXAiOiJKV1QifQ.eyJpYXQiOjE3NDgzNTYxMjksImlzcyI6Imh0dHBzOi8vYXBpLm9jcC5lbGVjdHJvbHV4Lm9uZS9vbmUtYWNjb3VudC1hdXRob3JpemF0aW9uIiwiYXVkIjpbImh0dHBzOi8vYXBpLm9jcC5lbGVjdHJvbHV4Lm9uZSIsImVsZWN0cm9sdXhfb2NwIl0sImV4cCI6MTc0ODM5OTMyOSwic3ViIjoiY2NjYTBiNzliMjE5NDUyOWE0MTA2YmNkODBlNTAxZTYiLCJhenAiOiJIZWlPcGVuQXBpIiwic2NvcGUiOiJlbWFpbCBvZmZsaW5lX2FjY2VzcyIsIm9jYyI6IkhVIn0.pXRmxbBBfhjARCNfAJj3YOvpZj6hm66cjdLiw55W-YJtudkruxmX8EmpUxwkdGREzKENPUzg1DF1HOZ4Uajyd05SKbR74Kbtm9ZL6ytr7_tOm_TnQQEk65v2VuEPv4BhJmXAObTOXi3SKZ8W6thQduPhqnfrYt-Q49gBlBZ8GCvvhgRA6070iEvzVjuz6E2IZ4_H0fqhR3zNAQ_ZbRgxuJdz4AwfJo3W30cKiVJens4nLtVWKZ889-D2b0GUmiRH1dyhpg1AnNmKQGSISCvphJPv1HVzBWhgf3h4mfyDXT4lGhMoYHZ8flS7rfjF3pqHDdGXKaHUz_mHGn4JbX932w';
+        this.refreshToken =
+            'fWAXEydextaI2b18bTyO8rIQ7r8inT9lvnfBnG1IpmBXn5P6lKc1fYRq7QOmeD2H9xDg558UNJtRjKu6qA2KCN7giCkn3HPRHC4Rfiimhl3l5uowUyk0rVuyDipLrYq0';
 
-        const regionData = regionResponse.data.find(
-            ({ brand }) => brand === 'electrolux'
-        );
-        if (!regionData) {
-            throw new Error('Region not found');
-        }
-
-        this.regionalBaseUrl = regionData?.httpRegionalBaseUrl ?? null;
-
-        this.gigya = new Gigya(
-            regionData?.apiKey,
-            regionData.domain.split('.')[0] as DataCenter
-        );
-
-        const storagePath = path.format({
-            dir: this.api.user.storagePath(),
-            base: 'homebridge_electrolux_device_persist.json'
-        });
-        if (fs.existsSync(storagePath)) {
-            this.log.info('Restoring auth data from cache...');
-
-            const json = fs.readFileSync(storagePath, 'utf8');
-            const data = JSON.parse(json);
-
-            this.uid = data.uid;
-            this.oauthToken = data.oauthToken;
-            this.sessionSecret = data.sessionSecret;
-
-            this.accessToken = data.accessToken;
-            this.refreshToken = data.refreshToken;
-            this.tokenExpirationDate = data.tokenExpirationDate;
-            this.log.info('Auth data restored from cache!');
-        }
-
-        try {
-            if (!this.uid || !this.oauthToken || !this.sessionSecret) {
-                this.log.info('Signing in to Gigya...');
-
-                const loginResponse = await this.gigya.accounts.login({
-                    loginID: this.config.email,
-                    password: this.config.password,
-                    targetEnv: 'mobile'
-                });
-                this.uid = loginResponse.UID;
-                this.oauthToken =
-                    loginResponse.sessionInfo?.sessionToken ?? null;
-                this.sessionSecret =
-                    loginResponse.sessionInfo?.sessionSecret ?? null;
-
-                this.log.info('Signed in to Gigya!');
-            }
-
-            if (
-                !this.accessToken ||
-                !this.refreshToken ||
-                !this.tokenExpirationDate ||
-                Date.now() >= this.tokenExpirationDate
-            ) {
-                this.log.info('Fetching JWT token...');
-
-                const jwtResponse = await this.gigya.accounts.getJWT({
-                    targetUID: this.uid,
-                    fields: 'country',
-                    oauth_token: this.oauthToken ?? undefined,
-                    secret: this.sessionSecret ?? undefined
-                });
-
-                const tokenResponse = await axiosAuth.post<TokenResponse>(
-                    '/one-account-authorization/api/v1/token',
-                    {
-                        grantType:
-                            'urn:ietf:params:oauth:grant-type:token-exchange',
-                        clientId: CLIENT_ID,
-                        idToken: jwtResponse.id_token,
-                        scope: ''
-                    },
-                    {
-                        baseURL: API_URL,
-                        headers: {
-                            'Origin-Country-Code': 'PL'
-                        }
-                    }
-                );
-
-                this.accessToken = tokenResponse.data.accessToken;
-                this.refreshToken = tokenResponse.data.refreshToken;
-                this.tokenExpirationDate =
-                    Date.now() + tokenResponse.data.expiresIn * 1000;
-
-                this.log.info('JWT token successfully fetched!');
-            }
-
-            const json = JSON.stringify({
-                uid: this.uid,
-                oauthToken: this.oauthToken,
-                sessionSecret: this.sessionSecret,
-
-                accessToken: this.accessToken,
-                refreshToken: this.refreshToken,
-                tokenExpirationDate: this.tokenExpirationDate
-            });
-
-            fs.writeFile(storagePath, json, 'utf8', (err) => {
-                if (err) {
-                    this.log.error(
-                        'An error occurred while saving auth data: ',
-                        err.message
-                    );
-                }
-            });
-        } catch (err) {
-            const message =
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                (err as any).response?.data?.message ?? (err as Error).message;
-
-            throw new Error("Couldn't not sign in to Electrolux: " + message);
-        }
+        this.regionalBaseUrl = 'https://api.developer.electrolux.one';
     }
 
     async refreshAccessToken() {
@@ -253,15 +111,13 @@ export class ElectroluxDevicesPlatform implements DynamicPlatformPlugin {
         this.log.info('Refreshing access token...');
 
         const response = await axiosAuth.post<TokenResponse>(
-            '/token',
+            '/refresh',
             {
                 grantType: 'refresh_token',
-                clientId: CLIENT_ID,
-                refreshToken: this.refreshToken,
-                scope: ''
+                refreshToken: this.refreshToken
             },
             {
-                baseURL: `${this.regionalBaseUrl}/one-account-authorization/api/v1`
+                baseURL: `${this.regionalBaseUrl}/api/v1/token`
             }
         );
 
@@ -274,7 +130,7 @@ export class ElectroluxDevicesPlatform implements DynamicPlatformPlugin {
 
     private async getAppliances() {
         const response = await axiosAppliance.get<Appliances>('/appliances', {
-            baseURL: `${this.regionalBaseUrl}/appliance/api/v2`,
+            baseURL: `${this.regionalBaseUrl}/api/v1`,
             headers: {
                 Authorization: `Bearer ${this.accessToken}`
             }
@@ -287,9 +143,9 @@ export class ElectroluxDevicesPlatform implements DynamicPlatformPlugin {
     ): Promise<Capabilities | null> {
         try {
             const response = await axiosAppliance.get<Capabilities>(
-                `/appliances/${applianceId}/capabilities`,
+                `/appliances/${applianceId}/info`,
                 {
-                    baseURL: `${this.regionalBaseUrl}/appliance/api/v2`,
+                    baseURL: `${this.regionalBaseUrl}/api/v1`,
                     headers: {
                         Authorization: `Bearer ${this.accessToken}`
                     }
